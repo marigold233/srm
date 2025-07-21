@@ -9,7 +9,7 @@
 
 ## 安装配置
 ```shell
-
+wget https://raw.githubusercontent.com/marigold233/srm/refs/heads/main/srm > $HOME/.local/bin/srm
 ```
 ## 配置（可选）
 默认配置
