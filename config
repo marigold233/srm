@@ -1,0 +1,6 @@
+# $HOME/.config/srm/config
+TRASH_DIR="$HOME/.trash"
+TRASH_DIR_MAX_SIZE="2G"
+MAX_FILE_SIZE_TO_TRASH="50M"
+MAX_RETENTION_DAYS_IN_TRASH="30"
+LOG_FILE="$HOME/.trash/trash.csv"

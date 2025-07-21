@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+set -e
+
+if test -f "$HOME/.config/srm/config"; then
+    . "$HOME/.config/srm/config"
+elif test -f "$HOME/.srmConfig"; then
+    . "$HOME/.srmConfig"
+elif test -f ".srmConfig"; then
+    . .srmConfig
+fi
+
+
+function log_message(){
+    local level="$1"
+    local message="$2"
+    local component="${3:-main}"
+
+    printf 'timestamp=%s level=%s component=%s pid=%d message=%s\n' \
+        "$(date --iso-8601=seconds)" \
+        "$level" \
+        "$component" \
+        "$$" \
+        "$message"
+}
+
+function manage_csv_log(){
+
+    function _log_write(){
+        printf "%s,%s,%s,%s,%s\n" "$@" >> "$LOG_FILE"
+    }
+
+    function _log_read(){
+        local search_string="$1"
+        awk -v str="$search_string" -F',' 'index($1, str) > 0' "$LOG_FILE"
+    }
+    
+    function _log_delete(){
+        local filename_to_delete="$1"
+        awk -F',' -v f="$filename_to_delete" '$3!=f' "$LOG_FILE" >"$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+    }
+
+    case "$1" in
+        _log_delete)
+            shift 1; _log_delete "$1";;
+        _log_read)
+            shift 1; _log_read "$1";;
+        _log_write)
+            shift 1; _log_write "$@";;
+    esac
+}
+
+function print_default_config(){
+    echo -e 'TRASH_DIR="$HOME/.trash"
+TRASH_DIR_MAX_SIZE="2G"
+MAX_FILE_SIZE_TO_TRASH="50M"
+MAX_RETENTION_DAYS_IN_TRASH="30"
+LOG_FILE="$HOME/.trash/trash.csv"'
+}
+
+
+function setup_environment(){
+    : ${TRASH_DIR:="$HOME/.trash"}
+    : ${TRASH_DIR_MAX_SIZE:="2G"}
+    : ${MAX_FILE_SIZE_TO_TRASH_MB:="50M"} 
+    : ${MAX_RETENTION_DAYS_IN_TRASH:="30"}
+    : ${LOG_FILE:="$HOME/.trash/trash.csv"}
+
+    MAX_FILE_SIZE_TO_TRASH_BYTES=$(numfmt --from=iec "$MAX_FILE_SIZE_TO_TRASH_MB")
+    TRASH_DIR_MAX_SIZE_BYTES=$(numfmt --from=iec "$TRASH_DIR_MAX_SIZE")
+
+    test -d "$TRASH_DIR" || mkdir -p "$TRASH_DIR"
+    if ! test -f "$LOG_FILE" || ! test -s "$LOG_FILE"; then
+        touch "$LOG_FILE"
+        local csv_header="file_name,original_dir,trashed_filename,mime_type,trashed_time"
+        printf "%s\n" "$csv_header" > "$LOG_FILE"
+    fi
+}
+
+function process_targets(){
+    declare -n trash_queue_ref="$1"
+    declare -n delete_queue_ref="$2"
+
+    for target_path in "${TARGET_FILE[@]}"; do
+        
+        local absolute_path
+        absolute_path=$(readlink -f "$target_path")
+
+        local size_bytes=0
+        if test -f "$absolute_path"; then
+            size_bytes=$(stat -c%s "$absolute_path")
+        elif test -d "$absolute_path"; then
+            size_bytes=$(du -bs "$absolute_path" | awk '{print $1}')
+        else
+            log_message "ERROR" "$absolute_path Not found."
+            exit 1
+        fi
+        if (( "$size_bytes" <= "$MAX_FILE_SIZE_TO_TRASH_BYTES" )); then
+            trash_queue_ref+=("$absolute_path")
+        else
+            delete_queue_ref+=("$absolute_path")
+        fi
+    done
+
+    for file_to_trash in "${trash_queue_ref[@]}"; do        
+        local original_basename
+        original_basename=$(basename "$file_to_trash")
+        local original_dirname
+        original_dirname=$(dirname "$file_to_trash")
+        local timestamp="$EPOCHSECONDS"
+        
+        local mime_type
+        mime_type=$(file -b --mime-type "$file_to_trash")
+        local trashed_time
+        trashed_time=$(printf '%(%Y-%m-%d %H:%M:%S)T\n'  "$timestamp")
+        local file_suffix
+        file_suffix="${timestamp}|$(cat /proc/sys/kernel/random/uuid)"
+        local trashed_filename="${original_basename}|${file_suffix}"
+
+        if mv "$file_to_trash" "${TRASH_DIR}/${trashed_filename}"; then
+            manage_csv_log _log_write "$original_basename" "$original_dirname" "$trashed_filename" "$mime_type" "$trashed_time"
+            printf "."
+        else
+            log_message "ERROR" "Failed to move file: $file_to_trash" >&2
+        fi
+    done
+    printf "\n"
+}
+
+
+function delete_large_files(){
+    local namedref=${1:=true}
+    if "$namedref"; then
+        declare -n delete_queue="$2"
+    else
+        declare -a delete_queue
+        delete_queue=("$2")
+    fi
+    for item in "${delete_queue[@]}"; do
+        local path
+        path=$(readlink -m "$item")
+        if [[ "$path" == "/" || "$path" == "$HOME" ]]; then
+            return 1
+        fi
+    done
+
+    if (( "${#delete_queue[@]}" > 0 )); then
+         printf "%s\0" "${delete_queue[@]}" | xargs -0 rm -rf
+    fi
+}
+
+
+
+function restore_from_trash(){
+    local search_term="$1"
+    local -a trash_items
+    mapfile -t trash_items < <(manage_csv_log _log_read "$search_term")
+
+    if (( "${#trash_items[@]}" == 0 )); then
+        log_message "ERROR" "No files found to restore matching '$search_term'" >&2
+        exit 1
+    fi
+
+    for i in "${!trash_items[@]}"; do
+        local line="${trash_items[$i]}"
+        local original_name original_dir trashed_name mime_type trashed_time
+        IFS=',' read -r original_name original_dir _ mime_type trashed_time <<< "$line"
+        printf '%d) %s (from %s, trashed on %s)\n' "$i" "$original_name" "$original_dir" "$trashed_time"
+    done
+
+    read -r -p "Please enter the number of the file you want to restore: " user_choice
+
+    if ! [[ "$user_choice" =~ ^[0-9]+$ ]] || (( user_choice < 0 || user_choice >= ${#trash_items[@]} )); then
+        log_message "ERROR" "Invalid selection: $user_choice" >&2
+        exit 1
+    fi
+
+    local selected_item_csv="${trash_items[$user_choice]}"
+    local selected_original_name selected_original_dir selected_trashed_name selected_mime_type
+    IFS=',' read -r selected_original_name selected_original_dir selected_trashed_name _ <<< "$selected_item_csv"
+
+    if mv -i "$TRASH_DIR/$selected_trashed_name" "$selected_original_dir/$selected_original_name"; then
+        manage_csv_log _log_delete "$selected_trashed_name"
+        log_message "INFO" "Successfully restored '$selected_original_dir/$selected_original_name'"
+    else
+        log_message "ERROR" "Failed to restore '$selected_original_dir/$selected_original_name'" >&2
+    fi
+
+}
+
+function empty_trash_bin(){
+    read -r -p "Are you sure you want to empty the Recycle Bin?[y/N]: " input
+    if ! [[ "$input" =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+    
+    if [[ -z "$TRASH_DIR" || "$TRASH_DIR" == "/" || "$TRASH_DIR" == "$HOME" ]]; then
+        log_message "ERROR" "Empty trash aborted: TRASH_DIR is set to a protected location ('$TRASH_DIR')"
+        return 1
+    fi
+    if rm -rf "$TRASH_DIR"/*; then
+        > "$LOG_FILE"
+        log_message "INFO" "Trash bin has been emptied successfully"
+        return 0
+    else
+        log_message "ERROR" "Failed to empty the trash bin" >&2
+        return 1
+    fi
+}
+
+function clean_old_trash_files(){
+    local days_old="${MAX_RETENTION_DAYS_IN_TRASH:=$1}"
+    local timestamp_day_old=$(date +%s -d "${days_old} days ago")
+    # mapfile -t old_files < <(find "$TRASH_DIR" -mindepth 1 -mtime +"${days_old}" -print)
+    # for f in "${old_files[@]}"; do
+    #     rm -rf "$f"
+    #     local trash_filename
+    #     trash_filename=$(basename "$f")
+    #     log_message _log_delete "$trash_filename"
+    # done
+    declare -a files_to_delete_path
+    declare -a files_to_delete_logname
+    while IFS=',' read _ original_dir trashed_filename _ _; do
+        if ! test -e  "$TRASH_DIR/$trashed_filename"; then
+            manage_csv_log _log_delete "$trashed_filename"
+        fi
+        mapfile -t -d "|" "trashed_filename_arry" <<< "$trashed_filename"
+        if (( "${trashed_filename_arry[1]}" < "$timestamp_day_old" )); then
+            files_to_delete_path+=("$TRASH_DIR/$trashed_filename")
+            files_to_delete_logname+=("trashed_filename")
+        fi
+    done < <(tail -n +2 "$LOG_FILE")
+
+    if (( "${#files_to_delete_path[@]}" > 0 )); then
+        delete_large_files true files_to_delete_path
+        for logname in "${files_to_delete_logname[@]}"; do
+            manage_csv_log _log_delete "$logname"
+        done
+        log_message "INFO" "Cleaned ${#files_to_delete_path[@]} old file(s) from trash."
+    else
+        log_message "INFO" "No trash files older than ${days_old} days to clean."
+    fi
+}
+
+
+function clean_exceed_trash_size_files(){
+    local trash_dir_size
+    trash_dir_size=$(du -bs "$TRASH_DIR" | awk '{print $1}')
+    if (( "$trash_dir_size" >= "$TRASH_DIR_MAX_SIZE_BYTES" )); then
+        while IFS=',' read _ _ trashed_filename _ _; do
+            if test -e "$TRASH_DIR/$trashed_filename"; then
+                delete_large_files false "$TRASH_DIR/$trashed_filename"
+                manage_csv_log _log_delete "$trashed_filename"
+            fi
+            local current_dir_size
+            current_dir_size=$(du -bs "$TRASH_DIR" | awk '{print $1}')
+            if (( "$current_dir_size" < "$TRASH_DIR_MAX_SIZE_BYTES" )); then
+                break
+            fi
+        done < <(tail -n +2 "$LOG_FILE")
+    fi
+}
+
+
+function print_usage(){
+    echo -e "
+Usage: $(basename "$0") [OPTION]... [FILE]...
+Safely removes file(s) by moving them to a trash bin.
+  -p        print default config.
+  -e        Empty the trash bin completely.
+  -a        Auto clean trash files.
+  -c DAYS   Clean trash files older than DAYS.
+  -r NAME   Restore a file from trash. NAME can be a partial filename.
+  -f FILE   Forcefully and permanently delete FILE (bypassed trash).
+  -h        Show this help message.
+
+If no options are given, specified FILEs are moved to the trash bin."
+}
+
+function main(){
+    TARGET_FILE=("$@")
+    if  (( "${#TARGET_FILE[@]}" == 0 )); then
+        print_usage
+        exit 0
+    fi
+
+    setup_environment
+    declare -a trash_queue
+    declare -a direct_delete_queue
+    process_targets trash_queue direct_delete_queue
+    delete_large_files true direct_delete_queue
+
+}
+
+declare -a force_delete_queue
+while getopts "hpaec:r:f:" opt; do
+    case "$opt" in
+        h)
+            print_usage
+            exit 0
+            ;;
+        p)
+            print_default_config
+            exit $?
+            ;;
+        a)
+            setup_environment
+            clean_old_trash_files
+            clean_exceed_trash_size_files
+            exit $?
+            ;;
+            
+        e)
+            setup_environment
+            empty_trash_bin
+            exit $?
+            ;;
+        c)
+            setup_environment
+            clean_old_trash_files "$OPTARG"
+            exit $?
+            ;;
+        r)
+            setup_environment
+            restore_from_trash "$OPTARG"
+            exit $?
+            ;;
+        f)
+            force_delete_queue+=("$OPTARG")
+            ;;
+
+        *)
+            print_usage
+            exit 1
+            ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+if (( "${#force_delete_queue[@]}" > 0 )); then
+    printf "Forcefully delete %d item(s)...\n" "${#force_delete_queue[@]}"
+    delete_large_files true force_delete_queue
+    exit 0
+fi
+
+main "$@"
