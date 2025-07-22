@@ -7,9 +7,9 @@
 - 可强制删除文件，不经过垃圾站
 - 配合crontab可以实现自动清理垃圾站
 
-## 安装配置
+## 安装
 ```shell
-wget https://raw.githubusercontent.com/marigold233/srm/refs/heads/main/srm > $HOME/.local/bin/srm
+wget https://raw.githubusercontent.com/marigold233/srm/refs/heads/main/srm -O  $HOME/.local/bin/srm
 ```
 ## 配置（可选）
 默认配置
