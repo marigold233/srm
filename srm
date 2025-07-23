@@ -260,6 +260,16 @@ function clean_exceed_trash_size_files(){
     fi
 }
 
+function print_trash_file_list(){
+    local format_pattern='%-5s %-60s %-25s\n'
+    printf "$format_pattern"  "no" "trash_file" "trashed_time"
+    printf "$format_pattern" "------------------------------------------------------------" "-------------------------" | sed 's/ -/--/g'
+    tail -n +2 "$LOG_FILE" | awk -F',' -v fmt="$format_pattern" '{ 
+        filepath = $2 "/" $1
+        printf(fmt, NR, filepath, $5)
+    }'
+}
+
 
 function print_usage(){
     echo -e "
@@ -292,7 +302,7 @@ function main(){
 }
 
 declare -a force_delete_queue
-while getopts "hpaec:r:f:" opt; do
+while getopts "hplaec:r:f:" opt; do
     case "$opt" in
         h)
             print_usage
@@ -300,6 +310,11 @@ while getopts "hpaec:r:f:" opt; do
             ;;
         p)
             print_default_config
+            exit $?
+            ;;
+        l)
+            setup_environment
+            print_trash_file_list
             exit $?
             ;;
         a)

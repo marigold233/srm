@@ -89,4 +89,13 @@ Are you sure you want to empty the Recycle Bin?[y/N]: y
 timestamp=2025-07-21T16:08:28+08:00 level=INFO component=main pid=15879 message=Trash bin has been emptied successfully
 $ srm -r testfile
 timestamp=2025-07-21T16:08:36+08:00 level=ERROR component=main pid=15919 message=No files found to restore matching 'testfile'
+
+$ ./srm -l
+no    trash_file                                                   trashed_time             
+--------------------------------------------------------------------------------------                                                             
+1     /home/capy/project/srm/testfile_1.dat                        2025-07-23 09:49:45      
+2     /home/capy/project/srm/testfile_2.dat                        2025-07-23 09:49:45      
+3     /home/capy/project/srm/testfile_3.dat                        2025-07-23 09:49:45      
+4     /home/capy/project/srm/testfile_4.dat                        2025-07-23 09:49:45      
+5     /home/capy/project/srm/testfile_5.dat                        2025-07-23 09:49:45 
 ```
