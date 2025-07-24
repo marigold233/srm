@@ -226,7 +226,7 @@ function clean_old_trash_files(){
         mapfile -t -d "|" "trashed_filename_arry" <<< "$trashed_filename"
         if (( "${trashed_filename_arry[1]}" < "$timestamp_day_old" )); then
             files_to_delete_path+=("$TRASH_DIR/$trashed_filename")
-            files_to_delete_logname+=("trashed_filename")
+            files_to_delete_logname+=("$trashed_filename")
         fi
     done < <(tail -n +2 "$LOG_FILE")
 
@@ -241,6 +241,18 @@ function clean_old_trash_files(){
     fi
 }
 
+function undo_last_operation(){
+    local last_trash_file
+    mapfile -t -d',' last_trash_file  < <(tail -1 "$LOG_FILE")
+    # printf "$TRASH_DIR/${last_trash_file[2]} ${last_trash_file[1]}/${last_trash_file[0]}\n"
+    if mv -i "$TRASH_DIR/${last_trash_file[2]}" "${last_trash_file[1]}/${last_trash_file[0]}"; then
+        log_message "INFO" "File: ${last_trash_file[1]}/${last_trash_file[0]} undo successfully."
+        manage_csv_log _log_delete "${last_trash_file[2]}"
+    else
+        log_message "ERROR" "File: ${last_trash_file[1]}/${last_trash_file[0]} undo failed." >&2
+    fi
+
+}
 
 function clean_exceed_trash_size_files(){
     local trash_dir_size
@@ -276,6 +288,8 @@ function print_usage(){
 Usage: $(basename "$0") [OPTION]... [FILE]...
 Safely removes file(s) by moving them to a trash bin.
   -p        print default config.
+  -u        undo last operation.
+  -l        print trashed file list.
   -e        Empty the trash bin completely.
   -a        Auto clean trash files.
   -c DAYS   Clean trash files older than DAYS.
@@ -302,7 +316,7 @@ function main(){
 }
 
 declare -a force_delete_queue
-while getopts "hplaec:r:f:" opt; do
+while getopts "hpulaec:r:f:" opt; do
     case "$opt" in
         h)
             print_usage
@@ -310,6 +324,11 @@ while getopts "hplaec:r:f:" opt; do
             ;;
         p)
             print_default_config
+            exit $?
+            ;;
+        u)
+            setup_environment
+            undo_last_operation
             exit $?
             ;;
         l)
